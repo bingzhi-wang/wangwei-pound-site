@@ -25,9 +25,41 @@ const FOLDER_TAGS = {
   sources: "来源",
 }
 
+/**
+ * 允许随站点发布的 raw/ 资源：知识库里的路径 -> 站点上的文件名。
+ * 指向这些文件的链接不会被降级成纯文字，而是改写成指向站点副本，
+ * `#page=N` 保留，浏览器里可以直接跳到该页。
+ * 其余 raw/ 文件（扫描件、整本专著）一律不上传。
+ */
+const PUBLISHED_ASSETS = {
+  "raw/1 王维/《王右丞集笺注》 王维 诗集！！重要可复制！.pdf": "王右丞集笺注.pdf",
+}
+
 if (!fs.existsSync(path.join(VAULT, "wiki"))) {
   console.error(`找不到知识库：${VAULT}\n用 VAULT=/path/to/vault node scripts/sync-content.mjs 指定路径。`)
   process.exit(1)
+}
+
+/** 把指向已发布资源的链接改写成站点上的相对路径（保留 #page=N） */
+function rewriteAssetLinks(md, depth) {
+  const prefix = "../".repeat(depth)
+  for (const [vaultPath, siteName] of Object.entries(PUBLISHED_ASSETS)) {
+    const esc = vaultPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const encoded = vaultPath.replace(/ /g, "%20").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const src = `(?:${esc}|${encoded})`
+    const target = (frag) => prefix + siteName + frag
+    md = md
+      // [[路径#page=n|显示文字]]
+      .replace(new RegExp(`\\[\\[\\s*${src}(#page=\\d+)?\\s*\\|([^\\]]*?)\\]\\]`, "g"),
+        (_m, frag, label) => `[${label}](${target(frag || "")})`)
+      // [[路径#page=n]]
+      .replace(new RegExp(`\\[\\[\\s*${src}(#page=\\d+)?\\s*\\]\\]`, "g"),
+        (_m, frag) => `[${siteName.replace(/\.pdf$/i, "")}](${target(frag || "")})`)
+      // [显示文字](<路径#page=n>) 或 [显示文字](路径#page=n)
+      .replace(new RegExp(`\\[([^\\]\n]*)\\]\\(\\s*<?\\s*${src}(#page=\\d+)?\\s*>?\\s*\\)`, "g"),
+        (_m, label, frag) => `[${label}](${target(frag || "")})`)
+  }
+  return md
 }
 
 /** 把指向 raw/ 的 PDF 链接换成纯文本 */
@@ -57,8 +89,8 @@ function buildFrontmatter(title, tags) {
   return lines.join("\n")
 }
 
-function transform(raw, fallbackTitle, tags) {
-  let md = raw.replace(/\r\n/g, "\n")
+function transform(raw, fallbackTitle, tags, depth = 0) {
+  let md = rewriteAssetLinks(raw.replace(/\r\n/g, "\n"), depth)
   if (md.startsWith("---\n")) return degradeRawLinks(md) // 已有 frontmatter，原样处理
 
   const lines = md.split("\n")
@@ -78,7 +110,7 @@ function collect() {
 
   const indexPath = path.join(VAULT, "index.md")
   if (fs.existsSync(indexPath)) {
-    let body = transform(fs.readFileSync(indexPath, "utf-8"), "索引", [])
+    let body = transform(fs.readFileSync(indexPath, "utf-8"), "索引", [], 0)
     const banner =
       "\n> [!info] 关于本站\n" +
       "> 这是课程知识库的网页版。课程藏书原件（PDF）因版权未公开，页面中的「文件 / 定位 / pg-xxx」等页码标注仅供对照原书之用，在网页上不可点击。\n" +
@@ -99,7 +131,7 @@ function collect() {
         const top = relPath.split(path.sep)[0]
         const tags = FOLDER_TAGS[top] ? [FOLDER_TAGS[top]] : []
         const base = entry.name.replace(/\.md$/, "")
-        out.set(relPath, transform(fs.readFileSync(abs, "utf-8"), base, tags))
+        out.set(relPath, transform(fs.readFileSync(abs, "utf-8"), base, tags, relPath.split(path.sep).length - 1))
       }
     }
   }
@@ -147,4 +179,14 @@ for (const [rel, body] of generated) {
   fs.mkdirSync(path.dirname(p), { recursive: true })
   fs.writeFileSync(p, body, "utf-8")
 }
-console.log(`✓ 已同步 ${generated.size} 个页面到 content/`)
+let assetCount = 0
+for (const [vaultPath, siteName] of Object.entries(PUBLISHED_ASSETS)) {
+  const src = path.join(VAULT, vaultPath)
+  if (!fs.existsSync(src)) {
+    console.warn(`⚠ 找不到要发布的资源：${vaultPath}`)
+    continue
+  }
+  fs.copyFileSync(src, path.join(contentDir, siteName))
+  assetCount++
+}
+console.log(`✓ 已同步 ${generated.size} 个页面、${assetCount} 个资源文件到 content/`)
